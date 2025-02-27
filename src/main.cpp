@@ -47,8 +47,9 @@ HardwareTimer sampleTimer(TIM1);
 
 //Global system state struct
 struct {
-  std::bitset<32> inputs;  
-  } sysState;
+  std::bitset<32> inputs;
+  SemaphoreHandle_t mutex;  
+} sysState;
 
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
@@ -96,6 +97,7 @@ void scanKeysTask(void * pvParameters) {
   for(;;){  
     uint32_t localCurrentStepSize{0};
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     for(int i=0;i<3;i++){
       setRow(i);
       delayMicroseconds(3);
@@ -109,6 +111,7 @@ void scanKeysTask(void * pvParameters) {
         localCurrentStepSize = stepSizes[i];
       }
     }
+    xSemaphoreGive(sysState.mutex);
     __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   }  
 }
@@ -124,8 +127,9 @@ void displayUpdateTask(void * pvParameters) {
     u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
     u8g2.drawStr(2,10,"Helllo World!");  // write something to the internal memory
     u8g2.setCursor(2,20);
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
     u8g2.print(sysState.inputs.to_ulong(),HEX);
-
+    xSemaphoreGive(sysState.mutex);
     u8g2.sendBuffer();          // transfer internal memory to the display
 
     //Toggle LED
@@ -167,6 +171,7 @@ void setup() {
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(setISR);
   sampleTimer.resume();
+  sysState.mutex = xSemaphoreCreateMutex();
   TaskHandle_t scanKeysHandle = NULL;
   xTaskCreate(
   scanKeysTask,		/* Function that implements the task */
