@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <bitset>
+#include <STM32FreeRTOS.h>
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -33,14 +34,21 @@
   const int HKOW_BIT = 5;
   const int HKOE_BIT = 6;
 
-
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
 //Step Sizes
-const uint32_t stepSizes [] = {51076056.67,54113197.05,57330935.19,60740010,64351798.95,68178356.04,72232452.06,76527617.17,81078186.09,85899345.92,91007186.83, 96418755.55};
+const uint32_t stepSizes [] = {51076056,54113197,57330935,60740010,64351798,68178356,72232452,76527617,81078186,85899345,91007186, 96418755};
 const std::string notes[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
 volatile uint32_t currentStepSize;
+
+//Interupt timer
+HardwareTimer sampleTimer(TIM1);
+
+//Global system state struct
+struct {
+  std::bitset<32> inputs;  
+  } sysState;
 
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
@@ -73,6 +81,38 @@ void setRow(uint8_t rowIdx){
   digitalWrite(REN_PIN, HIGH);
 }
 
+void setISR(){
+  static uint32_t phaseAcc = 0;
+  phaseAcc += currentStepSize;
+  int32_t Vout = (phaseAcc >> 24) - 128;
+  analogWrite(OUTR_PIN, Vout + 128);
+}
+  
+void scanKeysTask(void * pvParameters) {
+  const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  for(;;){  
+    vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    for(int i=0;i<3;i++){
+      setRow(i);
+      delayMicroseconds(3);
+      sysState.inputs.set(i*4, readCols()[0]);
+      sysState.inputs.set(i*4+1, readCols()[1]);
+      sysState.inputs.set(i*4+2, readCols()[2]);
+      sysState.inputs.set(i*4+3, readCols()[3]);
+    }
+    for(int i=0;i<12;i++){
+      if(sysState.inputs[i]==0){
+        currentStepSize = stepSizes[i];
+      }
+    }
+  }  
+}
+
+void displayUpdateTask(){
+  delayMicroseconds(100);
+}
+
 void setup() {
   // put your setup code here, to run once:
 
@@ -103,14 +143,29 @@ void setup() {
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
+
+  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+  sampleTimer.attachInterrupt(setISR);
+  sampleTimer.resume();
+  vTaskStartScheduler();
+  TaskHandle_t scanKeysHandle = NULL;
+  xTaskCreate(
+    scanKeysTask,		/* Function that implements the task */
+    "scanKeys",		/* Text name for the task */
+    64,      		/* Stack size in words, not bytes */
+    NULL,			/* Parameter passed into the task */
+    1,			/* Task priority */
+    &scanKeysHandle);	/* Pointer to store the task handle */
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
   static uint32_t next = millis();
-  std::bitset<32> inputs;
-  static uint32_t count = 0;
-  int carryout = 0;
+  //std::bitset<32> inputs;
+  //static uint32_t count = 0;
+  //volatile localCurrentStepSize = 0
+  //int carryout = 0;
+  
 
   while (millis() < next);  //Wait for next interval
 
@@ -119,23 +174,24 @@ void loop() {
   //Update display
   u8g2.clearBuffer();         // clear the internal memory
   u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  for(int i=0;i<3;i++){
-    setRow(i);
-    delayMicroseconds(3);
-    inputs.set(i*4, readCols()[0]);
-    inputs.set(i*4+1, readCols()[1]);
-    inputs.set(i*4+2, readCols()[2]);
-    inputs.set(i*4+3, readCols()[3]);
-  }
-  for(int i=0;i<12;i++){
-    if(inputs[i]==0){
-      currentStepSize = stepSizes[i];
-      carryout = i;
-    }
-  }
+  // for(int i=0;i<3;i++){
+  //   setRow(i);
+  //   delayMicroseconds(3);
+  //   inputs.set(i*4, readCols()[0]);
+  //   inputs.set(i*4+1, readCols()[1]);
+  //   inputs.set(i*4+2, readCols()[2]);
+  //   inputs.set(i*4+3, readCols()[3]);
+  // }
+  // for(int i=0;i<12;i++){
+  //   if(inputs[i]==0){
+  //     localCurrentStepSize = stepSizes[i];
+  //     carryout = i;
+  //   }
+  // }
+  //__atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   u8g2.setCursor(2,20);
-  u8g2.print(inputs.to_ulong(),HEX); 
-  u8g2.drawStr(2, 30, notes[carryout]);  //must be char* 
+  u8g2.print(sysState.inputs.to_ulong(),HEX); 
+  //u8g2.drawStr(2, 30, notes[carryout]);  //must be char* 
   u8g2.sendBuffer();          // transfer internal memory to the display
 
   //Toggle LED
