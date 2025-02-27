@@ -89,9 +89,12 @@ void setISR(){
 }
   
 void scanKeysTask(void * pvParameters) {
+
   const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
+
   for(;;){  
+    uint32_t localCurrentStepSize{0};
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
     for(int i=0;i<3;i++){
       setRow(i);
@@ -103,14 +106,31 @@ void scanKeysTask(void * pvParameters) {
     }
     for(int i=0;i<12;i++){
       if(sysState.inputs[i]==0){
-        currentStepSize = stepSizes[i];
+        localCurrentStepSize = stepSizes[i];
       }
     }
+    __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   }  
 }
 
-void displayUpdateTask(){
-  delayMicroseconds(100);
+void displayUpdateTask(void * pvParameters) {
+  const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+
+  while (1) {
+    vTaskDelayUntil( &xLastWakeTime, xFrequency );
+      //Update display
+    u8g2.clearBuffer();         // clear the internal memory
+    u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
+    u8g2.drawStr(2,10,"Helllo World!");  // write something to the internal memory
+    u8g2.setCursor(2,20);
+    u8g2.print(sysState.inputs.to_ulong(),HEX);
+
+    u8g2.sendBuffer();          // transfer internal memory to the display
+
+    //Toggle LED
+    digitalToggle(LED_BUILTIN);
+  }
 }
 
 void setup() {
@@ -147,54 +167,24 @@ void setup() {
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(setISR);
   sampleTimer.resume();
-  vTaskStartScheduler();
   TaskHandle_t scanKeysHandle = NULL;
   xTaskCreate(
-    scanKeysTask,		/* Function that implements the task */
-    "scanKeys",		/* Text name for the task */
-    64,      		/* Stack size in words, not bytes */
-    NULL,			/* Parameter passed into the task */
-    1,			/* Task priority */
-    &scanKeysHandle);	/* Pointer to store the task handle */
+  scanKeysTask,		/* Function that implements the task */
+  "scanKeys",		/* Text name for the task */
+  64,      		/* Stack size in words, not bytes */
+  NULL,			/* Parameter passed into the task */
+  1,			/* Task priority */
+  &scanKeysHandle);	/* Pointer to store the task handle */
+  TaskHandle_t displayUpdateHandle = NULL;
+  xTaskCreate(
+  displayUpdateTask,		/* Function that implements the task */
+  "displayUpdate",		/* Text name for the task */
+  256,      		/* Stack size in words, not bytes */
+  NULL,			/* Parameter passed into the task */
+  1,			/* Task priority */
+  &displayUpdateHandle);	/* Pointer to store the task handle */
+  vTaskStartScheduler();
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-  static uint32_t next = millis();
-  //std::bitset<32> inputs;
-  //static uint32_t count = 0;
-  //volatile localCurrentStepSize = 0
-  //int carryout = 0;
-  
-
-  while (millis() < next);  //Wait for next interval
-
-  next += interval;
-
-  //Update display
-  u8g2.clearBuffer();         // clear the internal memory
-  u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-  // for(int i=0;i<3;i++){
-  //   setRow(i);
-  //   delayMicroseconds(3);
-  //   inputs.set(i*4, readCols()[0]);
-  //   inputs.set(i*4+1, readCols()[1]);
-  //   inputs.set(i*4+2, readCols()[2]);
-  //   inputs.set(i*4+3, readCols()[3]);
-  // }
-  // for(int i=0;i<12;i++){
-  //   if(inputs[i]==0){
-  //     localCurrentStepSize = stepSizes[i];
-  //     carryout = i;
-  //   }
-  // }
-  //__atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
-  u8g2.setCursor(2,20);
-  u8g2.print(sysState.inputs.to_ulong(),HEX); 
-  //u8g2.drawStr(2, 30, notes[carryout]);  //must be char* 
-  u8g2.sendBuffer();          // transfer internal memory to the display
-
-  //Toggle LED
-  digitalToggle(LED_BUILTIN);
-  
 }
