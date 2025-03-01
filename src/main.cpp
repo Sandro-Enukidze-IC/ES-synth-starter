@@ -93,12 +93,13 @@ void scanKeysTask(void * pvParameters) {
 
   const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  static std::bitset<2> previousKnobState;
 
   for(;;){  
     uint32_t localCurrentStepSize{0};
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    for(int i=0;i<3;i++){
+    for(int i=0;i<4;i++){
       setRow(i);
       delayMicroseconds(3);
       sysState.inputs.set(i*4, readCols()[0]);
@@ -111,6 +112,8 @@ void scanKeysTask(void * pvParameters) {
         localCurrentStepSize = stepSizes[i];
       }
     }
+    previousKnobState.set(0, sysState.inputs[13]);
+    previousKnobState.set(1, sysState.inputs[12]);
     xSemaphoreGive(sysState.mutex);
     __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   }  
