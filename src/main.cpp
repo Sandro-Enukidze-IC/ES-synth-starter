@@ -2,6 +2,7 @@
 #include <U8g2lib.h>
 #include <bitset>
 #include <STM32FreeRTOS.h>
+#include "Knob.h"
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -37,6 +38,9 @@
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
+//Instantiate the message
+volatile uint8_t TX_Message[8] = {0};
+
 //Step Sizes
 const uint32_t stepSizes [] = {51076056,54113197,57330935,60740010,64351798,68178356,72232452,76527617,81078186,85899345,91007186, 96418755};
 const std::string notes[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
@@ -49,8 +53,13 @@ HardwareTimer sampleTimer(TIM1);
 struct {
   std::bitset<32> inputs;
   SemaphoreHandle_t mutex;
-  int k3rotation = 0;  
+  Knob knob0{0};
+  Knob knob1{1};
+  Knob knob2{2};
+  Knob knob3{3};
 } sysState;
+
+Knob* knobs[] = {&sysState.knob0, &sysState.knob1, &sysState.knob2, &sysState.knob3};
 
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
@@ -85,29 +94,49 @@ void setRow(uint8_t rowIdx){
 
 void setISR(){
   static uint32_t phaseAcc = 0;
-  phaseAcc += currentStepSize;
+  int k2r = __atomic_load_n(&sysState.knob2.rotation, __ATOMIC_ACQUIRE);   
+  if(k2r > 3){
+    phaseAcc = phaseAcc + (currentStepSize << (k2r - 4));
+  }
+  else{
+    phaseAcc = phaseAcc + (currentStepSize >> (4 - k2r));
+  }
   int32_t Vout = (phaseAcc >> 24) - 128;
-  int k3r = __atomic_load_n(&sysState.k3rotation, __ATOMIC_ACQUIRE);   
+  int k3r = __atomic_load_n(&sysState.knob3.rotation, __ATOMIC_ACQUIRE); 
   Vout = Vout >> (8 - k3r);
-  
+
   analogWrite(OUTR_PIN, Vout + 128);
 }
   
 void scanKeysTask(void * pvParameters) {
-
+  
   const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  static std::bitset<2> previousKnobState;
   static int lastIncrement;
-  static int k3r;
+  std::bitset<4> cols;
 
   for(;;){ 
     uint32_t localCurrentStepSize{0};
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    for(int i=0;i<4;i++){
+    for(int i=0;i<5;i++){
       setRow(i);
       delayMicroseconds(3);
+      cols = readCols();
+      if(i<3){
+        for(int j=0;j<4;j++){
+          if(cols[j] != sysState.inputs[(i*4 + j)]){
+            if(cols[j] == 0){
+              TX_Message[0] = 'P'; //Pressed
+            }
+            else{
+              TX_Message[0] = 'K'; //Released
+            }
+            TX_Message[1] = sysState.knob2.rotation; //Octave
+            TX_Message[2] = (i*4 + j); //Note Number
+          }
+        }
+      }
       sysState.inputs.set(i*4, readCols()[0]);
       sysState.inputs.set(i*4+1, readCols()[1]);
       sysState.inputs.set(i*4+2, readCols()[2]);
@@ -118,38 +147,12 @@ void scanKeysTask(void * pvParameters) {
         localCurrentStepSize = stepSizes[i];
       }
     }
-    //current states = inputs <13,12> previous states in param
-    if(previousKnobState[1] == sysState.inputs[13]){ //if B stays the same
-      if(previousKnobState[0] != sysState.inputs[12]){ //if A flips
-        if(previousKnobState[1] == previousKnobState[0]){ //if prev state B = A
-          if(k3r < 8){    
-            k3r += 1;
-            lastIncrement = 1;
-          }
-        }
-        else{
-          if(0 < k3r){
-            k3r -= 1;
-            lastIncrement = -1;
-          }
-        }
-      }
+    for(int i=0;i<4;i++){
+      int currentStateA = sysState.inputs[(12 + (3-i)*2)];
+      int currentStateB = sysState.inputs[(13 + (3-i)*2)];
+      knobs[i]->updateValues(currentStateA, currentStateB);
     }
-    else{   //If B flips
-      if(previousKnobState[0] != sysState.inputs[12]){ //if A flips
-        int t = k3r + lastIncrement;
-        Serial.println(t);
-        if(-1 < t && t < 9){
-          Serial.println("Took if");
-          k3r = k3r + lastIncrement;
-        }  
-      }
-    }
-    previousKnobState.set(1, sysState.inputs[13]);
-    previousKnobState.set(0, sysState.inputs[12]);
     xSemaphoreGive(sysState.mutex);
-    //Serial.println(lastIncrement);
-    __atomic_store_n(&sysState.k3rotation, k3r, __ATOMIC_RELEASE);
     __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   }  
 }
@@ -165,11 +168,22 @@ void displayUpdateTask(void * pvParameters) {
     u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
     //u8g2.drawStr(2,10,"Hello World!");  // write something to the internal memory
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    std::string str = std::to_string(sysState.k3rotation);
-    //Serial.print(sysState.k3rotation);
-    char * cstr = new char [str.length() + 1];
-    strcpy(cstr, str.c_str());
-    u8g2.drawStr(2,10, cstr);
+    char cstr0[2], cstr1[2], cstr2[2], cstr3[2];
+    snprintf(cstr0, sizeof(cstr0), "%d", sysState.knob0.rotation);
+    snprintf(cstr1, sizeof(cstr1), "%d", sysState.knob1.rotation);
+    snprintf(cstr2, sizeof(cstr2), "%d", sysState.knob2.rotation);
+    snprintf(cstr3, sizeof(cstr3), "%d", sysState.knob3.rotation);
+
+    u8g2.drawStr(2,10, cstr0);
+    u8g2.drawStr(20,10, cstr1);
+    u8g2.drawStr(38,10, cstr2);
+    u8g2.drawStr(56,10, cstr3);  
+
+    u8g2.setCursor(66,30);
+    u8g2.print((char) TX_Message[0]);
+    u8g2.print(TX_Message[1]);
+    u8g2.print(TX_Message[2]);
+
     u8g2.setCursor(2,20);
     u8g2.print(sysState.inputs.to_ulong(),HEX);
     xSemaphoreGive(sysState.mutex);
@@ -182,6 +196,7 @@ void displayUpdateTask(void * pvParameters) {
 
 void setup() {
   // put your setup code here, to run once:
+  sysState.knob2.rotation = 4;
 
   //Set pin directions
   pinMode(RA0_PIN, OUTPUT);
