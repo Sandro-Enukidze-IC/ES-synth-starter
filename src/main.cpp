@@ -2,7 +2,9 @@
 #include <U8g2lib.h>
 #include <bitset>
 #include <STM32FreeRTOS.h>
+#include <stm32l4xx_hal.h> 
 #include "Knob.h"
+#include <ES_CAN.h>
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -37,9 +39,6 @@
 
 //Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
-
-//Instantiate the message
-volatile uint8_t TX_Message[8] = {0};
 
 //Step Sizes
 const uint32_t stepSizes [] = {51076056,54113197,57330935,60740010,64351798,68178356,72232452,76527617,81078186,85899345,91007186, 96418755};
@@ -114,6 +113,7 @@ void scanKeysTask(void * pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   static int lastIncrement;
   std::bitset<4> cols;
+  uint8_t TX_Message[8] = {0};
 
   for(;;){ 
     uint32_t localCurrentStepSize{0};
@@ -137,6 +137,7 @@ void scanKeysTask(void * pvParameters) {
           }
         }
       }
+      CAN_TX(0x123, TX_Message);
       sysState.inputs.set(i*4, readCols()[0]);
       sysState.inputs.set(i*4+1, readCols()[1]);
       sysState.inputs.set(i*4+2, readCols()[2]);
@@ -160,6 +161,8 @@ void scanKeysTask(void * pvParameters) {
 void displayUpdateTask(void * pvParameters) {
   const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  uint32_t ID;
+  uint8_t RX_Message[8]={0};
 
   while (1) {
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
@@ -174,19 +177,23 @@ void displayUpdateTask(void * pvParameters) {
     snprintf(cstr2, sizeof(cstr2), "%d", sysState.knob2.rotation);
     snprintf(cstr3, sizeof(cstr3), "%d", sysState.knob3.rotation);
 
+    while (CAN_CheckRXLevel())
+	    CAN_RX(ID, RX_Message);
+
     u8g2.drawStr(2,10, cstr0);
     u8g2.drawStr(20,10, cstr1);
     u8g2.drawStr(38,10, cstr2);
     u8g2.drawStr(56,10, cstr3);  
 
     u8g2.setCursor(66,30);
-    u8g2.print((char) TX_Message[0]);
-    u8g2.print(TX_Message[1]);
-    u8g2.print(TX_Message[2]);
+    u8g2.print((char) RX_Message[0]);
+    u8g2.print(RX_Message[1]);
+    u8g2.print(RX_Message[2]);
 
     u8g2.setCursor(2,20);
     u8g2.print(sysState.inputs.to_ulong(),HEX);
     xSemaphoreGive(sysState.mutex);
+    
     u8g2.sendBuffer();          // transfer internal memory to the display
 
     //Toggle LED
@@ -221,6 +228,10 @@ void setup() {
   setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
   u8g2.begin();
   setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
+
+  CAN_Init(true);
+  setCANFilter(0x123,0x7ff);
+  CAN_Start();
 
   //Initialise UART
   Serial.begin(9600);
