@@ -48,7 +48,8 @@ HardwareTimer sampleTimer(TIM1);
 //Global system state struct
 struct {
   std::bitset<32> inputs;
-  SemaphoreHandle_t mutex;  
+  SemaphoreHandle_t mutex;
+  int k3rotation = 0;  
 } sysState;
 
 //Function to set outputs using key matrix
@@ -86,16 +87,21 @@ void setISR(){
   static uint32_t phaseAcc = 0;
   phaseAcc += currentStepSize;
   int32_t Vout = (phaseAcc >> 24) - 128;
+  int k3r = __atomic_load_n(&sysState.k3rotation, __ATOMIC_ACQUIRE);   
+  Vout = Vout >> (8 - k3r);
+  
   analogWrite(OUTR_PIN, Vout + 128);
 }
   
 void scanKeysTask(void * pvParameters) {
 
-  const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   static std::bitset<2> previousKnobState;
+  static int lastIncrement;
+  static int k3r;
 
-  for(;;){  
+  for(;;){ 
     uint32_t localCurrentStepSize{0};
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -112,9 +118,38 @@ void scanKeysTask(void * pvParameters) {
         localCurrentStepSize = stepSizes[i];
       }
     }
-    previousKnobState.set(0, sysState.inputs[13]);
-    previousKnobState.set(1, sysState.inputs[12]);
+    //current states = inputs <13,12> previous states in param
+    if(previousKnobState[1] == sysState.inputs[13]){ //if B stays the same
+      if(previousKnobState[0] != sysState.inputs[12]){ //if A flips
+        if(previousKnobState[1] == previousKnobState[0]){ //if prev state B = A
+          if(k3r < 8){    
+            k3r += 1;
+            lastIncrement = 1;
+          }
+        }
+        else{
+          if(0 < k3r){
+            k3r -= 1;
+            lastIncrement = -1;
+          }
+        }
+      }
+    }
+    else{   //If B flips
+      if(previousKnobState[0] != sysState.inputs[12]){ //if A flips
+        int t = k3r + lastIncrement;
+        Serial.println(t);
+        if(-1 < t && t < 9){
+          Serial.println("Took if");
+          k3r = k3r + lastIncrement;
+        }  
+      }
+    }
+    previousKnobState.set(1, sysState.inputs[13]);
+    previousKnobState.set(0, sysState.inputs[12]);
     xSemaphoreGive(sysState.mutex);
+    //Serial.println(lastIncrement);
+    __atomic_store_n(&sysState.k3rotation, k3r, __ATOMIC_RELEASE);
     __atomic_store_n(&currentStepSize, localCurrentStepSize, __ATOMIC_RELAXED);
   }  
 }
@@ -128,9 +163,14 @@ void displayUpdateTask(void * pvParameters) {
       //Update display
     u8g2.clearBuffer();         // clear the internal memory
     u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-    u8g2.drawStr(2,10,"Helllo World!");  // write something to the internal memory
-    u8g2.setCursor(2,20);
+    //u8g2.drawStr(2,10,"Hello World!");  // write something to the internal memory
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    std::string str = std::to_string(sysState.k3rotation);
+    //Serial.print(sysState.k3rotation);
+    char * cstr = new char [str.length() + 1];
+    strcpy(cstr, str.c_str());
+    u8g2.drawStr(2,10, cstr);
+    u8g2.setCursor(2,20);
     u8g2.print(sysState.inputs.to_ulong(),HEX);
     xSemaphoreGive(sysState.mutex);
     u8g2.sendBuffer();          // transfer internal memory to the display
